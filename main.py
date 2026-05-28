@@ -60,6 +60,10 @@ def main(args):
         alpha=args.alpha,
         target_slice=data_loader.target_slice,
         norm=args.norm,
+        lifting_levels=args.lifting_levels,
+        lifting_kernel_size=args.lifting_kernel_size,
+        regu_details=args.regu_details,
+        regu_approx=args.regu_approx,
         layernorm=args.layernorm
     ).to(device)
 
@@ -249,6 +253,30 @@ def parse_args():
         default=2,
         help='scale of mix layer',
     )
+    parser.add_argument(
+    '--lifting_kernel_size',
+    type=int,
+    default=7,
+    help='conv kernel size for lifting scheme wavelet filters',
+)
+parser.add_argument(
+    '--lifting_levels',
+    type=int,
+    default=3,
+    help='number of wavelet decomposition levels (replaces mix_layer_num for MDM)',
+)
+parser.add_argument(
+    '--regu_details',
+    type=float,
+    default=0.0,
+    help='regularization weight on wavelet detail coefficients',
+)
+parser.add_argument(
+    '--regu_approx',
+    type=float,
+    default=0.0,
+    help='regularization weight on wavelet approximation',
+)
     parser.add_argument(
         # 4 8 16
         '--patch',
