@@ -3,8 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import math
+def normalization(channels: int):
+    return nn.InstanceNorm1d(num_features=channels)
 
-from models.LiftingScheme import LiftingScheme, InverseLiftingScheme
+from layers.LiftingScheme import LiftingScheme, InverseLiftingScheme
 class RevIN(nn.Module):
     def __init__(self, num_features: int, eps=1e-5, affine=True):
         """
@@ -53,11 +55,58 @@ class RevIN(nn.Module):
         x = x * self.stdev[:, :, target_slice]
         x = x + self.mean[:, :, target_slice]
         return x
-
 class MDM(nn.Module):
+    """
+    Wavelet-based multi-scale decomposition replacing average-pooling MDM.
+    Keeps the same interface: MDM(input_shape, k=k, c=c, ...)
+    Returns U: [B, C, L]  (same shape as original MDM output)
+    """
+    def __init__(self, input_shape, k=3, c=2,
+                 lifting_kernel_size=7, regu_details=0.0, regu_approx=0.0,
+                 layernorm=True, **kwargs):
+        super(MDM, self).__init__()
+
+        seq_len = input_shape[0]
+        enc_in  = input_shape[1]
+        self.levels = k   # k = lifting_levels (reuse existing arg)
+
+        # minimal config object so AdpWaveletBlock works unchanged
+        class _Cfg:
+            pass
+        cfg = _Cfg()
+        cfg.enc_in              = enc_in
+        cfg.lifting_kernel_size = lifting_kernel_size
+        cfg.regu_details        = regu_details
+        cfg.regu_approx         = regu_approx
+
+        self.encoder_levels = nn.ModuleList()
+        self.decoder_levels = nn.ModuleList()
+
+        size = seq_len
+        for _ in range(self.levels):
+            self.encoder_levels.append(AdpWaveletBlock(cfg, size))
+            size = size // 2
+
+        for _ in range(self.levels - 1, -1, -1):
+            self.decoder_levels.append(InverseAdpWaveletBlock(cfg, size))
+            size = size * 2
+
+    def forward(self, x):
+        # x: [B, C, L]
+        coeffs = []
+        approx = x
+        for enc in self.encoder_levels:
+            approx, _, d = enc(approx)   # AdpWaveletBlock returns (x, r, d)
+            coeffs.append(d)
+
+        for dec, d in zip(self.decoder_levels, reversed(coeffs)):
+            approx = dec(approx, d)
+
+        return approx   # [B, C, L]
+class AdpWaveletBlock(nn.Module):
     # def __init__(self, in_channels, kernel_size, share_weights, simple_lifting, regu_details, regu_approx):
     def __init__(self, configs, input_size):
-        super(AdpWaveletBlock, self).__init__()
+        super(MDM, self).__init__()
         self.regu_details = configs.regu_details
         self.regu_approx = configs.regu_approx
         if self.regu_approx + self.regu_details > 0.0:
@@ -88,6 +137,54 @@ class MDM(nn.Module):
         d = self.norm_d(d)
         
         return x, r, d
+class MDM(nn.Module):
+    """
+    Multi-level wavelet MDM — keeps (input_shape, ...) signature
+    so tsAMD.py needs zero changes.
+    """
+    def __init__(self, input_shape, lifting_levels=3, lifting_kernel_size=7,
+                 regu_details=0.0, regu_approx=0.0, **kwargs):
+        super().__init__()
+        seq_len = input_shape[0]
+        enc_in  = input_shape[1]
+        self.levels = lifting_levels
+
+        class _Cfg:
+            pass
+        cfg = _Cfg()
+        cfg.enc_in              = enc_in
+        cfg.lifting_kernel_size = lifting_kernel_size
+        cfg.regu_details        = regu_details
+        cfg.regu_approx         = regu_approx
+
+        self.encoder_levels = nn.ModuleList()
+        self.decoder_levels = nn.ModuleList()
+
+        size = seq_len
+        for _ in range(lifting_levels):
+            self.encoder_levels.append(AdpWaveletBlock(cfg, size))
+            size = size // 2
+
+        for _ in range(lifting_levels - 1, -1, -1):
+            self.decoder_levels.append(InverseAdpWaveletBlock(cfg, size))
+            size = size * 2
+
+    def forward(self, x):
+        # x: [B, C, L]
+        coeffs = []
+        regu_total = None
+        approx = x
+
+        for enc in self.encoder_levels:
+            approx, r, d = enc(approx)   # returns (approx, regu, details)
+            coeffs.append(d)
+            if r is not None:
+                regu_total = r if regu_total is None else regu_total + r
+
+        for dec, d in zip(self.decoder_levels, reversed(coeffs)):
+            approx = dec(approx, d)
+
+        return approx, regu_total   # same interface as original MDM: (x, r)
 
 class InverseAdpWaveletBlock(nn.Module):
     # def __init__(self, in_channels, kernel_size, share_weights, simple_lifting):
