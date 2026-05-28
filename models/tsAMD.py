@@ -1,17 +1,15 @@
 import torch
 import torch.nn as nn
 
-from models.common import RevIN
-from models.common import DDI
-# ADD this line at the top
-from layers.LiftingScheme import LiftingScheme, InverseLiftingScheme
+from models.common import RevIN, DDI, MDM
 from models.tsmoe import AMS
 
 
 class AMD(nn.Module):
-    """Implementation of AMD."""
-
-    def __init__(self, input_shape, pred_len, n_block, dropout, patch, k, c, alpha, target_slice, norm=True, layernorm=True):
+    def __init__(self, input_shape, pred_len, n_block, dropout, patch, k, c,
+                 alpha, target_slice, norm=True, layernorm=True,
+                 lifting_levels=3, lifting_kernel_size=7,
+                 regu_details=0.0, regu_approx=0.0):
         super(AMD, self).__init__()
 
         self.target_slice = target_slice
@@ -20,40 +18,56 @@ class AMD(nn.Module):
         if self.norm:
             self.rev_norm = RevIN(input_shape[-1])
 
-        self.pastmixing = MDM(input_shape, k=k, c=c, layernorm=layernorm)
+        # MDM: adaptive wavelet decomposition (first step, replaces avg-pool MDM)
+        self.pastmixing = MDM(
+            input_shape,
+            k=lifting_levels,
+            c=c,
+            lifting_kernel_size=lifting_kernel_size,
+            regu_details=regu_details,
+            regu_approx=regu_approx,
+            layernorm=layernorm,
+        )
 
-        self.fc_blocks = nn.ModuleList([DDI(input_shape, dropout=dropout, patch=patch, alpha=alpha, layernorm=layernorm)
-                                        for _ in range(n_block)])
+        self.fc_blocks = nn.ModuleList([
+            DDI(input_shape, dropout=dropout, patch=patch,
+                alpha=alpha, layernorm=layernorm)
+            for _ in range(n_block)
+        ])
 
-        self.moe = AMS(input_shape, pred_len, ff_dim=2048, dropout=dropout, num_experts=8, top_k=2)
+        self.moe = AMS(input_shape, pred_len, ff_dim=2048,
+                       dropout=dropout, num_experts=8, top_k=2)
 
     def forward(self, x):
-        # [batch_size, seq_len, feature_num]
+        # x: [B, seq_len, feature_num]
 
-        # layer norm
         if self.norm:
             x = self.rev_norm(x, 'norm')
-        # [batch_size, seq_len, feature_num]
 
-        # [batch_size, seq_len, feature_num]
         x = torch.transpose(x, 1, 2)
-        # [batch_size, feature_num, seq_len]
+        # x: [B, feature_num, seq_len]
 
-        time_embedding = self.pastmixing(x)
+        # Step 1: Adaptive wavelet decomposition (replaces avg-pool MDM)
+        x, wavelet_regu = self.pastmixing(x)
+        # x: [B, C, L] — wavelet-reconstructed signal used as time embedding
+        time_embedding = x   # pass the wavelet output to AMS
 
+        # Step 2: DDI blocks refine the same signal
         for fc_block in self.fc_blocks:
             x = fc_block(x)
 
-        # MOE
-        x, moe_loss = self.moe(x, time_embedding)  # seq_len -> pred_len
+        # Step 3: AMS mixture-of-experts forecasting
+        x, moe_loss = self.moe(x, time_embedding)
 
-        # [batch_size, feature_num, pred_len]
+        # fold wavelet regularization into the total loss
+        if wavelet_regu is not None:
+            moe_loss = moe_loss + wavelet_regu
+
         x = torch.transpose(x, 1, 2)
-        # [batch_size, pred_len, feature_num]
+        # x: [B, pred_len, feature_num]
 
         if self.norm:
             x = self.rev_norm(x, 'denorm', self.target_slice)
-        # [batch_size, pred_len, feature_num]
 
         if self.target_slice:
             x = x[:, :, self.target_slice]

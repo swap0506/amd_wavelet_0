@@ -55,58 +55,11 @@ class RevIN(nn.Module):
         x = x * self.stdev[:, :, target_slice]
         x = x + self.mean[:, :, target_slice]
         return x
-class MDM(nn.Module):
-    """
-    Wavelet-based multi-scale decomposition replacing average-pooling MDM.
-    Keeps the same interface: MDM(input_shape, k=k, c=c, ...)
-    Returns U: [B, C, L]  (same shape as original MDM output)
-    """
-    def __init__(self, input_shape, k=3, c=2,
-                 lifting_kernel_size=7, regu_details=0.0, regu_approx=0.0,
-                 layernorm=True, **kwargs):
-        super(MDM, self).__init__()
 
-        seq_len = input_shape[0]
-        enc_in  = input_shape[1]
-        self.levels = k   # k = lifting_levels (reuse existing arg)
-
-        # minimal config object so AdpWaveletBlock works unchanged
-        class _Cfg:
-            pass
-        cfg = _Cfg()
-        cfg.enc_in              = enc_in
-        cfg.lifting_kernel_size = lifting_kernel_size
-        cfg.regu_details        = regu_details
-        cfg.regu_approx         = regu_approx
-
-        self.encoder_levels = nn.ModuleList()
-        self.decoder_levels = nn.ModuleList()
-
-        size = seq_len
-        for _ in range(self.levels):
-            self.encoder_levels.append(AdpWaveletBlock(cfg, size))
-            size = size // 2
-
-        for _ in range(self.levels - 1, -1, -1):
-            self.decoder_levels.append(InverseAdpWaveletBlock(cfg, size))
-            size = size * 2
-
-    def forward(self, x):
-        # x: [B, C, L]
-        coeffs = []
-        approx = x
-        for enc in self.encoder_levels:
-            approx, _, d = enc(approx)   # AdpWaveletBlock returns (x, r, d)
-            coeffs.append(d)
-
-        for dec, d in zip(self.decoder_levels, reversed(coeffs)):
-            approx = dec(approx, d)
-
-        return approx   # [B, C, L]
-class AdpWaveletBlock(nn.Module):
+class AdaWaveletBlock(nn.Module):
     # def __init__(self, in_channels, kernel_size, share_weights, simple_lifting, regu_details, regu_approx):
     def __init__(self, configs, input_size):
-        super(MDM, self).__init__()
+        super(AdaWaveletBlock, self).__init__()
         self.regu_details = configs.regu_details
         self.regu_approx = configs.regu_approx
         if self.regu_approx + self.regu_details > 0.0:
@@ -137,6 +90,17 @@ class AdpWaveletBlock(nn.Module):
         d = self.norm_d(d)
         
         return x, r, d
+
+
+class InverseAdaWaveletBlock(nn.Module):
+    # def __init__(self, in_channels, kernel_size, share_weights, simple_lifting):
+    def __init__(self, configs, input_size):
+        super(InverseAdaWaveletBlock, self).__init__()
+        self.inverse_wavelet = InverseLiftingScheme(configs.enc_in, input_size=input_size, kernel_size=configs.lifting_kernel_size)
+
+    def forward(self, c, d):
+        reconstructed = self.inverse_wavelet(c, d)
+        return reconstructed
 class MDM(nn.Module):
     """
     Multi-level wavelet MDM — keeps (input_shape, ...) signature
@@ -185,16 +149,6 @@ class MDM(nn.Module):
             approx = dec(approx, d)
 
         return approx, regu_total   # same interface as original MDM: (x, r)
-
-class InverseAdpWaveletBlock(nn.Module):
-    # def __init__(self, in_channels, kernel_size, share_weights, simple_lifting):
-    def __init__(self, configs, input_size):
-        super(InverseAdpWaveletBlock, self).__init__()
-        self.inverse_wavelet = InverseLiftingScheme(configs.enc_in, input_size=input_size, kernel_size=configs.lifting_kernel_size)
-
-    def forward(self, c, d):
-        reconstructed = self.inverse_wavelet(c, d)
-        return reconstructed
 
 
 class DDI(nn.Module):
