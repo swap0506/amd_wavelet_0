@@ -3,28 +3,18 @@ import argparse
 import os
 from pathlib import Path
 import sys
-
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # main root directory
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
-
 import torch
 from tqdm import tqdm
 from copy import deepcopy
-
-
-
-
 import time
-
-
 from utils.general import set_seed
 from utils.dataloader import CustomDataLoader
 from models.tsAMD import AMD
-
-
 
 def main(args):
     # select device
@@ -68,7 +58,12 @@ def main(args):
     ).to(device)
 
     print(sum(p.numel() for p in model.parameters()))
+    total_params = sum(p.numel() for p in model.parameters())
+    print("Total Params:", total_params)
 
+    for name, module in model.named_children():
+        params = sum(p.numel() for p in module.parameters())
+        print(name, params)
     # set criterion and optimizer
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=1e-9)
@@ -254,29 +249,29 @@ def parse_args():
         help='scale of mix layer',
     )
     parser.add_argument(
-    '--lifting_kernel_size',
-    type=int,
-    default=7,
-    help='conv kernel size for lifting scheme wavelet filters',
-)
-parser.add_argument(
-    '--lifting_levels',
-    type=int,
-    default=3,
-    help='number of wavelet decomposition levels (replaces mix_layer_num for MDM)',
-)
-parser.add_argument(
-    '--regu_details',
-    type=float,
-    default=0.0,
-    help='regularization weight on wavelet detail coefficients',
-)
-parser.add_argument(
-    '--regu_approx',
-    type=float,
-    default=0.0,
-    help='regularization weight on wavelet approximation',
-)
+        '--lifting_kernel_size',
+        type=int,
+        default=7,
+        help='conv kernel size for lifting scheme wavelet filters',
+    )
+    parser.add_argument(
+        '--lifting_levels',
+        type=int,
+        default=3,
+        help='number of wavelet decomposition levels (replaces mix_layer_num for MDM)',
+    )
+    parser.add_argument(
+        '--regu_details',
+        type=float,
+        default=0.0,
+        help='regularization weight on wavelet detail coefficients',
+    )
+    parser.add_argument(
+        '--regu_approx',
+        type=float,
+        default=0.0,
+        help='regularization weight on wavelet approximation',
+    )
     parser.add_argument(
         # 4 8 16
         '--patch',
@@ -318,6 +313,7 @@ parser.add_argument(
     )
     args = parser.parse_args()
     return args
+    
 
 
 if __name__ == '__main__':

@@ -3,17 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import math
+
+
 def normalization(channels: int):
     return nn.InstanceNorm1d(num_features=channels)
 
+
 from layers.LiftingScheme import LiftingScheme, InverseLiftingScheme
+
+
 class RevIN(nn.Module):
     def __init__(self, num_features: int, eps=1e-5, affine=True):
-        """
-        :param num_features: the number of features or channels
-        :param eps: a value added for numerical stability
-        :param affine: if True, RevIN has learnable affine parameters
-        """
         super(RevIN, self).__init__()
         self.num_features = num_features
         self.eps = eps
@@ -33,12 +33,14 @@ class RevIN(nn.Module):
 
     def _init_params(self):
         self.affine_weight = nn.Parameter(torch.ones(self.num_features))
-        self.affine_bias = nn.Parameter(torch.zeros(self.num_features))
+        self.affine_bias   = nn.Parameter(torch.zeros(self.num_features))
 
     def _get_statistics(self, x):
         dim2reduce = tuple(range(1, x.ndim - 1))
-        self.mean = torch.mean(x, dim=dim2reduce, keepdim=True).detach()
-        self.stdev = torch.sqrt(torch.var(x, dim=dim2reduce, keepdim=True, unbiased=False) + self.eps).detach()
+        self.mean  = torch.mean(x, dim=dim2reduce, keepdim=True).detach()
+        self.stdev = torch.sqrt(
+            torch.var(x, dim=dim2reduce, keepdim=True, unbiased=False) + self.eps
+        ).detach()
 
     def _normalize(self, x):
         x = x - self.mean
@@ -56,16 +58,17 @@ class RevIN(nn.Module):
         x = x + self.mean[:, :, target_slice]
         return x
 
+
 class AdaWaveletBlock(nn.Module):
-    # def __init__(self, in_channels, kernel_size, share_weights, simple_lifting, regu_details, regu_approx):
     def __init__(self, configs, input_size):
         super(AdaWaveletBlock, self).__init__()
         self.regu_details = configs.regu_details
-        self.regu_approx = configs.regu_approx
+        self.regu_approx  = configs.regu_approx
         if self.regu_approx + self.regu_details > 0.0:
             self.loss_details = nn.SmoothL1Loss()
 
-        self.wavelet = LiftingScheme(configs.enc_in, k_size=configs.lifting_kernel_size, input_size=input_size)
+        self.wavelet = LiftingScheme(configs.enc_in, k_size=configs.lifting_kernel_size,
+                                     input_size=input_size)
         self.norm_x = normalization(configs.enc_in)
         self.norm_d = normalization(configs.enc_in)
 
@@ -74,7 +77,7 @@ class AdaWaveletBlock(nn.Module):
         x = c
 
         r = None
-        if(self.regu_approx + self.regu_details != 0.0):
+        if self.regu_approx + self.regu_details != 0.0:
             if self.regu_details:
                 rd = self.regu_details * d.abs().mean()
             if self.regu_approx:
@@ -88,23 +91,51 @@ class AdaWaveletBlock(nn.Module):
 
         x = self.norm_x(x)
         d = self.norm_d(d)
-        
         return x, r, d
 
 
 class InverseAdaWaveletBlock(nn.Module):
-    # def __init__(self, in_channels, kernel_size, share_weights, simple_lifting):
     def __init__(self, configs, input_size):
         super(InverseAdaWaveletBlock, self).__init__()
-        self.inverse_wavelet = InverseLiftingScheme(configs.enc_in, input_size=input_size, kernel_size=configs.lifting_kernel_size)
+        self.inverse_wavelet = InverseLiftingScheme(
+            configs.enc_in, input_size=input_size,
+            kernel_size=configs.lifting_kernel_size
+        )
 
     def forward(self, c, d):
-        reconstructed = self.inverse_wavelet(c, d)
-        return reconstructed
+        return self.inverse_wavelet(c, d)
+
+
+class ChannelWiseAttention(nn.Module):
+    """
+    Squeeze-and-Excitation style channel attention applied at the
+    coarsest approximation level.  Learns which channels (variables)
+    matter most before passing to the AMS gating network.
+    """
+    def __init__(self, channels: int, reduction: int = 4):
+        super().__init__()
+        hidden = max(channels // reduction, 1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, hidden, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, channels, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        # x: [B, C, L]
+        # Global average pool over time → [B, C]
+        scale = x.mean(dim=-1)
+        # Attention weights → [B, C]
+        scale = self.fc(scale)
+        # Recalibrate → [B, C, L]
+        return x * scale.unsqueeze(-1)
+
+
 class MDM(nn.Module):
     """
-    Multi-level wavelet MDM — keeps (input_shape, ...) signature
-    so tsAMD.py needs zero changes.
+    Multi-level wavelet MDM with Channel-Wise Attention (CWA) at the
+    coarsest encoder level.
     """
     def __init__(self, input_shape, lifting_levels=3, lifting_kernel_size=7,
                  regu_details=0.0, regu_approx=0.0, **kwargs):
@@ -125,36 +156,42 @@ class MDM(nn.Module):
         self.decoder_levels = nn.ModuleList()
 
         size = seq_len
-        for _ in range(lifting_levels):
-            self.encoder_levels.append(AdpWaveletBlock(cfg, size))
+        for level in range(lifting_levels):
+            self.encoder_levels.append(AdaWaveletBlock(cfg, size))
             size = size // 2
 
+        # CWA applied after the coarsest approximation (bottom encoder level)
+        # FIX: helps model learn channel dominance at the most compressed scale
+        self.cwa = ChannelWiseAttention(enc_in)
+
         for _ in range(lifting_levels - 1, -1, -1):
-            self.decoder_levels.append(InverseAdpWaveletBlock(cfg, size))
+            self.decoder_levels.append(InverseAdaWaveletBlock(cfg, size))
             size = size * 2
 
     def forward(self, x):
         # x: [B, C, L]
-        coeffs = []
+        coeffs     = []
         regu_total = None
-        approx = x
+        approx     = x
 
-        for enc in self.encoder_levels:
-            approx, r, d = enc(approx)   # returns (approx, regu, details)
+        for idx, enc in enumerate(self.encoder_levels):
+            approx, r, d = enc(approx)
             coeffs.append(d)
             if r is not None:
                 regu_total = r if regu_total is None else regu_total + r
 
+        # Apply CWA at the coarsest approximation (after all encoder levels)
+        approx = self.cwa(approx)
+
         for dec, d in zip(self.decoder_levels, reversed(coeffs)):
             approx = dec(approx, d)
 
-        return approx, regu_total   # same interface as original MDM: (x, r)
+        return approx, regu_total   # (reconstructed_x, regularisation_loss)
 
 
 class DDI(nn.Module):
     def __init__(self, input_shape, dropout=0.2, patch=12, alpha=0.0, layernorm=True):
         super(DDI, self).__init__()
-        # input_shape[0] = seq_len    input_shape[1] = feature_num
         self.input_shape = input_shape
         if alpha > 0.0:
             self.ff_dim = 2 ** math.ceil(math.log2(self.input_shape[-1]))
@@ -168,8 +205,8 @@ class DDI(nn.Module):
             )
 
         self.n_history = 1
-        self.alpha = alpha
-        self.patch = patch
+        self.alpha  = alpha
+        self.patch  = patch
 
         self.layernorm = layernorm
         if self.layernorm:
@@ -178,40 +215,31 @@ class DDI(nn.Module):
         if self.alpha > 0.0:
             self.norm2 = nn.BatchNorm1d(self.patch * self.input_shape[-1])
 
-        self.agg = nn.Linear(self.n_history * self.patch, self.patch)
+        self.agg       = nn.Linear(self.n_history * self.patch, self.patch)
         self.dropout_t = nn.Dropout(dropout)
 
     def forward(self, x):
-        # [batch_size, feature_num, seq_len]
+        # x: [batch_size, feature_num, seq_len]
         if self.layernorm:
             x = self.norm(torch.flatten(x, 1, -1)).reshape(x.shape)
 
         output = torch.zeros_like(x)
         output[:, :, :self.n_history * self.patch] = x[:, :, :self.n_history * self.patch].clone()
-        for i in range(self.n_history * self.patch, self.input_shape[0], self.patch):
-            # input [batch_size, feature_num, self.n_history * patch]
-            input = output[:, :, i - self.n_history * self.patch: i]
-            # input [batch_size, feature_num, self.n_history * patch]
-            input = self.norm1(torch.flatten(input, 1, -1)).reshape(input.shape)
-            # aggregation
-            # [batch_size, feature_num, patch]
-            input = F.gelu(self.agg(input))  # self.n_history * patch -> patch
-            input = self.dropout_t(input)
-            # input [batch_size, feature_num, patch]
-            # input = torch.squeeze(input, dim=-1)
-            tmp = input + x[:, :, i: i + self.patch]
 
+        for i in range(self.n_history * self.patch, self.input_shape[0], self.patch):
+            inp  = output[:, :, i - self.n_history * self.patch: i]
+            inp  = self.norm1(torch.flatten(inp, 1, -1)).reshape(inp.shape)
+            inp  = F.gelu(self.agg(inp))
+            inp  = self.dropout_t(inp)
+
+            tmp = inp + x[:, :, i: i + self.patch]
             res = tmp
 
-            # [batch_size, feature_num, patch]
             if self.alpha > 0.0:
                 tmp = self.norm2(torch.flatten(tmp, 1, -1)).reshape(tmp.shape)
                 tmp = torch.transpose(tmp, 1, 2)
-                # [batch_size, patch, feature_num]
                 tmp = self.fc_block(tmp)
                 tmp = torch.transpose(tmp, 1, 2)
             output[:, :, i: i + self.patch] = res + self.alpha * tmp
 
-        # [batch_size, feature_num, seq_len]
         return output
-
