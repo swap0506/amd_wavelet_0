@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.common import RevIN, DDI, MDM
+from models.common import DDI, MDM
+from models.normalization import get_norm
 from models.tsmoe import AMS
 
 
@@ -10,7 +11,7 @@ class AMD(nn.Module):
     def __init__(self, input_shape, pred_len, n_block, dropout, patch, k, c,
                  alpha, target_slice, norm=True, layernorm=True,
                  lifting_levels=3, lifting_kernel_size=7,
-                 regu_details=0.0, regu_approx=0.0):
+                 regu_details=0.0, regu_approx=0.0,norm_type='revin'):
         super(AMD, self).__init__()
 
         self.target_slice = target_slice
@@ -18,7 +19,8 @@ class AMD(nn.Module):
         self.seq_len = input_shape[0]
 
         if self.norm:
-            self.rev_norm = RevIN(input_shape[-1])
+             self.rev_norm = get_norm(norm_type, input_shape[-1])
+             print("Normalization:", norm_type)
 
         # MDM: adaptive multi-level wavelet decomposition
         # FIX: use correct keyword args that MDM.__init__ actually accepts

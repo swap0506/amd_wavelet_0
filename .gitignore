@@ -167,9 +167,9 @@ data/
 *.ckpt
 __pycache__/
 checkpoints/
-data/
+data/mpi_roof.csv
 
 dengue_35_são_paulo.csv
 sao_paulo_dengue.csv
 sao_paulo_dengue_agg.csv
-exchange_rate.txt.gz
+exchange_rate.txt.gz"data/mpi_roof.csv" 

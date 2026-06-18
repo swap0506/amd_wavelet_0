@@ -54,7 +54,8 @@ def main(args):
         lifting_kernel_size=args.lifting_kernel_size,
         regu_details=args.regu_details,
         regu_approx=args.regu_approx,
-        layernorm=args.layernorm
+        layernorm=args.layernorm,
+        norm_type=args.norm_type,
     ).to(device)
 
     print(sum(p.numel() for p in model.parameters()))
@@ -186,6 +187,20 @@ def parse_args():
                         type=str,
                         default=ROOT / f'../data/{dataset}.{infer_extension(dataset)}',
                         help='dataset path')
+    parser.add_argument(
+                        '--norm_type',
+                        type=str,
+                        default='revin',
+                        choices=[
+                            'revin',
+                             'zscore',
+                             'robust',
+                             'minmax',
+                             'log_revin',
+                             'adaptive',
+                             'none'
+                        ]
+    )
     parser.add_argument(
         '--feature_type',
         type=str,
