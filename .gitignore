@@ -161,13 +161,11 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 checkpoints/
-data/
 *.pth
 *.pt
 *.ckpt
 __pycache__/
 checkpoints/
-data/mpi_roof.csv
 
 dengue_35_são_paulo.csv
 sao_paulo_dengue.csv
