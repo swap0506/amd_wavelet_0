@@ -1,6 +1,3 @@
-<p align="center">
-    <img src="assets/logo.png" width="150">
-</p>
 
 
 # Adaptive Multi-Scale Decomposition Framework for Time Series Forecasting
